@@ -639,7 +639,7 @@ def main() -> None:
         help="JS8 submode (default: normal)",
     )
     parser.add_argument(
-        "--base", type=float, default=1500.0,
+        "--freq", type=float, default=1500.0,
         help="Base audio frequency in Hz (default: 1500)",
     )
     parser.add_argument(
@@ -689,13 +689,13 @@ def main() -> None:
         print(f"Grid           : {grid}  ({len(grid)} chars)")
         print(f"Submode        : {args.speed}  "
               f"(nsps={submode['nsps']}, slot={submode['slot']}s)")
-        print(f"Base frequency : {args.base:.1f} Hz")
+        print(f"Base frequency : {args.freq:.1f} Hz")
         print(f"JS8 frames     : {len(frames)}")
 
     all_audio: list[float] = []
     for number, frame in enumerate(frames, start=1):
         information, crc, tones, audio = encode_frame(
-            frame["payload"], frame["i3"], submode, matrix, args.base,
+            frame["payload"], frame["i3"], submode, matrix, args.freq,
         )
         if args.verbose:
             print()

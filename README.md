@@ -52,7 +52,7 @@ WAV files are decodable by standard JS8Call receivers.
 | `--lat` / `--lon` | Decimal degrees (WGS84); both required together |
 | `--precision` | Grid length when deriving from lat/lon: 4, 6, 8 or 10 (default 10) |
 | `--speed` | Submode: `normal` (default), `fast`, `turbo`, `slow`, `ultra` |
-| `--base` | Base audio frequency in Hz (default 1500) |
+| `--freq` | Base audio frequency in Hz (default 1500) |
 | `-o`, `--output` | Output WAV path (default: `CALLSIGN_GRID_SPEED.wav`) |
 | `--raw` | Emit signal only (no slot padding / start delay) |
 | `--play` | Play via `ffplay` |
