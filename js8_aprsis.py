@@ -2,14 +2,21 @@
 """
 JS8Call-compatible @APRSIS GRID generator.
 
-Produces a 2-frame JS8 transmission:
-  Frame 1: directed  CALLSIGN -> @APRSIS GRID
-  Frame 2: Huffman data with the Maidenhead grid (4, 6, 8 or 10 chars)
+Produces a JS8 @APRSIS GRID transmission:
+
+  Frame 1:     directed  CALLSIGN -> @APRSIS GRID
+  Frame 2..N:  Huffman data carrying the Maidenhead grid
+
+Grids of 4–10 characters fit in one data frame (2 frames total).
+A 12-character grid spills into a second data frame (3 frames total).
+All data frames use the same legacy Huffman coding that JS8Call
+already decodes for @APRSIS GRID reports.
 
 Examples:
   ./js8_aprsis.py VK0LID PG74
   ./js8_aprsis.py VK0LID PG74EJ33KV --speed turbo
-  ./js8_aprsis.py VK0LID --lat -34.60 --lon 134.36 --precision 8 -o out.wav
+  ./js8_aprsis.py VK0LID PG74EJ33KV12 --speed turbo   # 12-char, 3 frames
+  ./js8_aprsis.py VK0LID --lat -34.60 --lon 134.36 --precision 12 -o out.wav
   ./js8_aprsis.py VK0LID PG74EJ --speed turbo --verbose
   ./js8_aprsis.py VK0LID PG74 --play                 # play only (no WAV kept)
   ./js8_aprsis.py VK0LID PG74 --speed turbo --play --immediate
@@ -46,6 +53,7 @@ ALPHABET72 = (
 ALPHANUMERIC = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ /@"
 
 FRAME_DIRECTED = 3
+TX_ANY = 0
 TX_FIRST = 1
 TX_LAST = 2
 
@@ -528,27 +536,29 @@ def encode_frame(
 # ---------------------------------------------------------------------------
 
 def validate_maidenhead(grid: str) -> str:
-    """Accept Maidenhead locators of length 4, 6, 8 or 10."""
+    """Accept Maidenhead locators of length 4, 6, 8, 10 or 12."""
     grid = grid.upper().strip()
     patterns = {
         4:  r"[A-R]{2}[0-9]{2}",
         6:  r"[A-R]{2}[0-9]{2}[A-X]{2}",
         8:  r"[A-R]{2}[0-9]{2}[A-X]{2}[0-9]{2}",
         10: r"[A-R]{2}[0-9]{2}[A-X]{2}[0-9]{2}[A-X]{2}",
+        12: r"[A-R]{2}[0-9]{2}[A-X]{2}[0-9]{2}[A-X]{2}[0-9]{2}",
     }
     pat = patterns.get(len(grid))
     if not pat or not re.fullmatch(pat, grid):
         raise ValueError(
             f"Invalid Maidenhead grid {grid!r}. "
-            "Length must be 4, 6, 8 or 10 characters "
-            "(e.g. PG74, PG74EJ, PG74EJ33, PG74EJ33KV)."
+            "Length must be 4, 6, 8, 10 or 12 characters "
+            "(e.g. PG74, PG74EJ, PG74EJ33, PG74EJ33KV, PG74EJ33KV12)."
         )
     return grid
 
 
 def latlon_to_maidenhead(lat: float, lon: float, precision: int = 6) -> str:
-    if precision not in (4, 6, 8, 10):
-        raise ValueError("precision must be 4, 6, 8 or 10")
+    """Convert WGS84 lat/lon to a Maidenhead locator (precision 4/6/8/10/12)."""
+    if precision not in (4, 6, 8, 10, 12):
+        raise ValueError("precision must be 4, 6, 8, 10 or 12")
     if not (-90.0 <= lat <= 90.0):
         raise ValueError(f"latitude out of range: {lat}")
     if not (-180.0 <= lon <= 180.0):
@@ -567,6 +577,7 @@ def latlon_to_maidenhead(lat: float, lon: float, precision: int = 6) -> str:
     grid = chr(ord("A") + A) + chr(ord("A") + B) + str(C) + str(D)
     if precision == 4:
         return grid
+
     E = int(adj_lon * 12.0)
     F = int(adj_lat * 24.0)
     adj_lon -= E / 12.0
@@ -574,6 +585,7 @@ def latlon_to_maidenhead(lat: float, lon: float, precision: int = 6) -> str:
     grid += chr(ord("A") + E) + chr(ord("A") + F)
     if precision == 6:
         return grid
+
     G = int(adj_lon * 120.0)
     H = int(adj_lat * 240.0)
     adj_lon -= G / 120.0
@@ -581,35 +593,86 @@ def latlon_to_maidenhead(lat: float, lon: float, precision: int = 6) -> str:
     grid += str(G) + str(H)
     if precision == 8:
         return grid
+
     I = int(adj_lon * 2880.0)
     J = int(adj_lat * 5760.0)
-    return grid + chr(ord("A") + I) + chr(ord("A") + J)
+    adj_lon -= I / 2880.0
+    adj_lat -= J / 5760.0
+    grid += chr(ord("A") + I) + chr(ord("A") + J)
+    if precision == 10:
+        return grid
+
+    K = min(int(adj_lon * 28800.0), 9)
+    L = min(int(adj_lat * 57600.0), 9)
+    return grid + str(K) + str(L)
+
+
+def pack_huffman_chunks(text: str) -> list[str]:
+    """
+    Split text into successive legacy Huffman data-frame payloads.
+
+    Uses the same prefix-"10" coding as a single-frame GRID report.
+    Each chunk fills as many characters as will fit in 70 payload bits.
+    """
+    text = text.upper()
+    frames: list[str] = []
+    pos = 0
+    while pos < len(text):
+        payload, n = pack_huffman_data_frame(text[pos:])
+        if n == 0:
+            raise ValueError(f"Cannot Huffman-encode character {text[pos]!r}")
+        frames.append(payload)
+        pos += n
+    return frames
 
 
 def build_aprsis_frames(callsign: str, grid: str) -> list[dict]:
+    """
+    Build the JS8 frame sequence for an @APRSIS GRID report.
+
+    Same coding as the working 2-frame path, with optional extra data
+    frames when the grid does not fit in one Huffman payload:
+
+      Frame 1:     directed  CALLSIGN -> @APRSIS GRID   (i3 = TX_FIRST)
+      Frame 2..N-1: Huffman data chunks                  (i3 = TX_ANY)
+      Frame N:     last Huffman data chunk               (i3 = TX_LAST)
+
+    All data frames use the legacy "10" Huffman prefix (no JS8CallData
+    i3 flag), which is what JS8Call already decodes for GRID reports.
+    """
     callsign = callsign.upper().strip()
     grid = validate_maidenhead(grid)
+
     directed = pack_directed_frame(callsign, "@APRSIS", "GRID")
-    data_payload, nchars = pack_huffman_data_frame(grid)
-    if nchars != len(grid):
-        raise ValueError(
-            f"Grid {grid!r} does not fit in one data frame "
-            f"({nchars}/{len(grid)} characters). Use 10 characters or fewer."
-        )
-    return [
+    data_payloads = pack_huffman_chunks(grid)
+
+    frames: list[dict] = [
         {
             "name": "DIRECTED",
             "payload": directed,
             "i3": TX_FIRST,
             "description": f"{callsign} -> @APRSIS GRID",
-        },
-        {
-            "name": "DATA",
-            "payload": data_payload,
-            "i3": TX_LAST,
-            "description": grid,
-        },
+        }
     ]
+
+    n_data = len(data_payloads)
+    for i, payload in enumerate(data_payloads):
+        is_last = i == n_data - 1
+        if n_data == 1:
+            desc = grid
+        else:
+            desc = f"{grid} (part {i + 1}/{n_data})"
+        frames.append(
+            {
+                "name": "DATA",
+                "payload": payload,
+                "i3": TX_LAST if is_last else TX_ANY,
+                "description": desc,
+            }
+        )
+
+    return frames
+
 
 
 # ---------------------------------------------------------------------------
@@ -618,20 +681,20 @@ def build_aprsis_frames(callsign: str, grid: str) -> list[dict]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Generate JS8 @APRSIS GRID audio (Maidenhead 4-10 chars, or lat/lon)",
+        description="Generate JS8 @APRSIS GRID audio (Maidenhead 4-12 chars, or lat/lon)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("callsign", help="Your callsign, e.g. VK0LID")
     parser.add_argument(
         "grid", nargs="?", default=None,
-        help="Maidenhead locator (4-10 chars), e.g. PG74EJ33KV",
+        help="Maidenhead locator (4-12 chars), e.g. PG74EJ33KV or PG74EJ33KV12",
     )
     parser.add_argument("--lat", type=float, default=None,
                         help="Latitude (decimal degrees, WGS84)")
     parser.add_argument("--lon", type=float, default=None,
                         help="Longitude (decimal degrees, WGS84)")
     parser.add_argument(
-        "--precision", type=int, default=10, choices=[4, 6, 8, 10],
+        "--precision", type=int, default=10, choices=[4, 6, 8, 10, 12],
         help="Maidenhead length when using --lat/--lon (default 10)",
     )
     parser.add_argument(
